@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"fmt"
+	"encoding/json"
 	"html/template"
 	"io"
 	"log"
@@ -13,29 +13,22 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/urfave/cli/v2"
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/exp/slices"
-	"golang.org/x/term"
 
 	"github.com/go-session/redis/v3"
 	"github.com/go-session/session/v3"
-
-	"database/sql"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 type config struct {
-	Address      string            `toml:"address"`
-	DatabaseFile string            `toml:"database_file"`
-	CookieName   string            `toml:"cookie_name"`
-	Redis        redisConfig       `toml:"redis"`
-	Targets      map[string]target `toml:"targets"`
+	Address    string            `toml:"address"`
+	CookieName string            `toml:"cookie_name"`
+	Redis      redisConfig       `toml:"redis"`
+	Jellyfin   jellyfinConfig    `toml:"jellyfin"`
+	Targets    map[string]target `toml:"targets"`
 }
 
 type redisConfig struct {
@@ -43,6 +36,11 @@ type redisConfig struct {
 	Addr     string `toml:"addr"`
 	Password string `toml:"password"`
 	DB       int    `toml:"db"`
+}
+
+type jellyfinConfig struct {
+	BaseURL string `toml:"base_url"`
+	Key     string `toml:"key"`
 }
 
 type target struct {
@@ -53,10 +51,10 @@ type target struct {
 type templateData struct {
 }
 
-type user struct {
-	ID       int
-	Name     string
-	Password string
+type jellyfinAuthResponse struct {
+	User struct {
+		ID string `json:"Id"`
+	}
 }
 
 var fallbackTemplate = `<!DOCTYPE html>
@@ -95,9 +93,8 @@ func main() {
 	log.SetPrefix("websieve: ")
 
 	c := config{
-		Address:      "localhost:8080",
-		DatabaseFile: "websieve.db",
-		CookieName:   "websieve",
+		Address:    "localhost:8080",
+		CookieName: "websieve",
 	}
 
 	paths := []string{
@@ -123,7 +120,6 @@ func main() {
 				Usage: "run websieve",
 				Action: func(ctx *cli.Context) error {
 					readConfig(cf, paths, toml.Unmarshal, &c)
-					db := getDB(c)
 
 					session.InitManager(
 						session.SetStore(redis.NewRedisStore(&redis.Options{
@@ -134,6 +130,11 @@ func main() {
 						})),
 						session.SetCookieName(c.CookieName),
 					)
+
+					jellyURL, err := url.Parse(c.Jellyfin.BaseURL)
+					if err != nil {
+						log.Fatalf("Cannot parse base URL: %s", err.Error())
+					}
 
 					re := regexp.MustCompile(`^[^/]+$`)
 					prefixre := regexp.MustCompile(`^/[^/]+`)
@@ -173,17 +174,31 @@ func main() {
 
 							userID, ok := store.Get("user_id")
 							if ok {
-								row := db.QueryRow(`
-									SELECT id
-									FROM user
-									WHERE id = ?
-								`, userID)
+								usersEndpoint := cloneURL(jellyURL)
+								usersEndpoint.Path, err = url.JoinPath(usersEndpoint.Path, "Users", userID.(string))
+								if err != nil {
+									http.Error(w, err.Error(), http.StatusInternalServerError)
+									log.Printf("Error while attempting to create new path: %s", err.Error())
+									return
+								}
 
-								err := row.Err()
-								if err == nil {
+								client := &http.Client{}
+								req, _ := http.NewRequest("GET", usersEndpoint.String(), nil)
+								req.Header.Set("x-emby-authorization", "MediaBrowser Client=\"JellyAuth\", Device=\"JellyAuth\", DeviceId=\"1\", Version=\"0.0.1\"")
+								req.Header.Set("Authorization", "Mediabrowser Token="+c.Jellyfin.Key)
+								resp, _ := client.Do(req)
+								if err != nil {
+									http.Error(w, err.Error(), http.StatusInternalServerError)
+									log.Printf("Error while validating user: %s", err.Error())
+									return
+								}
+
+								if resp.StatusCode != 200 {
+									log.Printf("Jellyfin returned %s", resp.Status)
+									http.Redirect(w, srcreq, relative, http.StatusSeeOther)
+									return
+								} else {
 									authenticated = true
-								} else if !errors.Is(err, sql.ErrNoRows) {
-									log.Fatalf("Error while scanning row: %s", err.Error())
 								}
 							}
 
@@ -195,35 +210,58 @@ func main() {
 
 									return
 								} else if srcreq.Method == "POST" {
-									fuser := user{
-										Name:     srcreq.FormValue("username"),
-										Password: srcreq.FormValue("password"),
-									}
+									fusername := srcreq.FormValue("username")
+									fpassword := srcreq.FormValue("password")
 
-									row := db.QueryRow(`
-										SELECT id, password
-										FROM user
-										WHERE name = ?
-									`, fuser.Name)
-
-									var user user
-									err = row.Scan(&user.ID, &user.Password)
+									authEndpoint := cloneURL(jellyURL)
+									authEndpoint.Path, err = url.JoinPath(authEndpoint.Path, "Users", "AuthenticateByName")
 									if err != nil {
-										if !errors.Is(err, sql.ErrNoRows) {
-											log.Fatalf("Error while scanning row: %s", err.Error())
-										} else {
-											log.Printf("User %s not found", fuser.Name)
-											http.Redirect(w, srcreq, relative, http.StatusSeeOther)
-											return
-										}
-									}
-
-									if bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(fuser.Password)) != nil {
-										http.Redirect(w, srcreq, relative, http.StatusSeeOther)
+										http.Error(w, err.Error(), http.StatusInternalServerError)
+										log.Printf("Error while attempting to create new path: %s", err.Error())
 										return
 									}
 
-									store.Set("user_id", user.ID)
+									body, err := json.Marshal(map[string]interface{}{
+										"Username": fusername,
+										"Pw":       fpassword,
+									})
+									if err != nil {
+										http.Error(w, err.Error(), http.StatusInternalServerError)
+										log.Printf("Could not marshal request body to JSON: %s", err.Error())
+										return
+									}
+
+									client := &http.Client{}
+									req, _ := http.NewRequest("POST", authEndpoint.String(), bytes.NewReader(body))
+									req.Header.Set("x-emby-authorization", "MediaBrowser Client=\"JellyAuth\", Device=\"JellyAuth\", DeviceId=\"1\", Version=\"0.0.1\"")
+									req.Header.Set("Authorization", "Mediabrowser Token="+c.Jellyfin.Key)
+									req.Header.Set("Content-Type", "application/json")
+									req.Header.Set("Accept", "application/json")
+									resp, err := client.Do(req)
+									if err != nil {
+										http.Error(w, err.Error(), http.StatusInternalServerError)
+										log.Printf("Error while validating user: %s", err.Error())
+										return
+									}
+
+									if resp.StatusCode != 200 {
+										log.Printf("Jellyfin returned %s", resp.Status)
+										http.Redirect(w, srcreq, relative, http.StatusSeeOther)
+										return
+									} else {
+										authenticated = true
+									}
+
+									encBody, err := io.ReadAll(resp.Body)
+									if err != nil {
+										http.Error(w, err.Error(), http.StatusInternalServerError)
+										log.Printf("Could not read response body: %s", err.Error())
+										return
+									}
+									decBody := jellyfinAuthResponse{}
+									json.Unmarshal(encBody, &decBody)
+
+									store.Set("user_id", decBody.User.ID)
 									err = store.Save()
 									if err != nil {
 										http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -299,57 +337,6 @@ func main() {
 					return nil
 				},
 			},
-			{
-				Name:  "register",
-				Usage: "register a new user",
-				Action: func(ctx *cli.Context) error {
-					readConfig(cf, paths, toml.Unmarshal, &c)
-					db := getDB(c)
-
-					for _, name := range ctx.Args().Slice() {
-						fmt.Fprintf(os.Stderr, "Enter password for new user %s: ", name)
-						bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-						fmt.Fprint(os.Stderr, "\n")
-						if err != nil {
-							return err
-						}
-						hashedPassword, err := bcrypt.GenerateFromPassword(bytePassword, 12)
-						if err != nil {
-							return err
-						}
-
-						_, err = db.Exec(`
-							INSERT INTO user (name, password)
-							VALUES (?, ?)
-						`, name, hashedPassword)
-						if err != nil {
-							return err
-						}
-					}
-
-					return nil
-				},
-			},
-			{
-				Name:  "revoke",
-				Usage: "delete an existing user",
-				Action: func(ctx *cli.Context) error {
-					readConfig(cf, paths, toml.Unmarshal, &c)
-					db := getDB(c)
-
-					for _, name := range ctx.Args().Slice() {
-						_, err := db.Exec(`
-							DELETE FROM user
-							WHERE name = ?
-						`, name)
-						if err != nil {
-							return err
-						}
-					}
-
-					return nil
-				},
-			},
 		},
 	}
 
@@ -392,33 +379,15 @@ func readConfig(path string, paths []string, unmarshal func(data []byte, v inter
 	}
 }
 
-func getDB(c config) *sql.DB {
-	db, err := sql.Open("sqlite3", c.DatabaseFile)
-	if err != nil {
-		log.Fatalf("Error while opening database: %s", err.Error())
+func cloneURL(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
 	}
-	err = initDB(db)
-	if err != nil {
-		log.Fatalf("Could not initialize the database: %s", err.Error())
+	u2 := new(url.URL)
+	*u2 = *u
+	if u.User != nil {
+		u2.User = new(url.Userinfo)
+		*u2.User = *u.User
 	}
-
-	return db
-}
-
-func initDB(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS user (
-			id INTEGER NOT NULL,
-			name TEXT NOT NULL,
-			password TEXT NOT NULL,
-			PRIMARY KEY (id),
-			UNIQUE (name)
-		);
-	`)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return u2
 }
