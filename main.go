@@ -300,41 +300,34 @@ func main() {
 				},
 			},
 			{
-				Name:    "user",
-				Aliases: []string{"u"},
-				Usage:   "user",
-				Subcommands: []*cli.Command{
-					{
-						Name:  "create",
-						Usage: "create a new user",
-						Action: func(ctx *cli.Context) error {
-							readConfig(cf, paths, toml.Unmarshal, &c)
-							db := getDB(c)
+				Name:  "register",
+				Usage: "register a new user",
+				Action: func(ctx *cli.Context) error {
+					readConfig(cf, paths, toml.Unmarshal, &c)
+					db := getDB(c)
 
-							for _, name := range ctx.Args().Slice() {
-								fmt.Fprintf(os.Stderr, "Enter password for new user %s: ", name)
-								bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-								fmt.Fprint(os.Stderr, "\n")
-								if err != nil {
-									return err
-								}
-								hashedPassword, err := bcrypt.GenerateFromPassword(bytePassword, 12)
-								if err != nil {
-									return err
-								}
+					for _, name := range ctx.Args().Slice() {
+						fmt.Fprintf(os.Stderr, "Enter password for new user %s: ", name)
+						bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+						fmt.Fprint(os.Stderr, "\n")
+						if err != nil {
+							return err
+						}
+						hashedPassword, err := bcrypt.GenerateFromPassword(bytePassword, 12)
+						if err != nil {
+							return err
+						}
 
-								_, err = db.Exec(`
-									INSERT INTO user (name, password)
-									VALUES (?, ?)
-								`, name, hashedPassword)
-								if err != nil {
-									return err
-								}
-							}
+						_, err = db.Exec(`
+							INSERT INTO user (name, password)
+							VALUES (?, ?)
+						`, name, hashedPassword)
+						if err != nil {
+							return err
+						}
+					}
 
-							return nil
-						},
-					},
+					return nil
 				},
 			},
 		},
