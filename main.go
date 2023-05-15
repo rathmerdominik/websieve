@@ -383,7 +383,7 @@ func getDB(c config, logger *log.Logger) *sql.DB {
 	if err != nil {
 		logger.Fatalf("Error while opening database: %s", err.Error())
 	}
-	err = initdb(db)
+	err = initDB(db)
 	if err != nil {
 		logger.Fatalf("Could not initialize the database: %s", err.Error())
 	}
@@ -391,7 +391,7 @@ func getDB(c config, logger *log.Logger) *sql.DB {
 	return db
 }
 
-func initdb(db *sql.DB) error {
+func initDB(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS user (
 			id INTEGER NOT NULL,
