@@ -184,9 +184,9 @@ func main() {
 
 								client := &http.Client{}
 								req, _ := http.NewRequest("GET", usersEndpoint.String(), nil)
-								req.Header.Set("x-emby-authorization", "MediaBrowser Client=\"JellyAuth\", Device=\"JellyAuth\", DeviceId=\"1\", Version=\"0.0.1\"")
-								req.Header.Set("Authorization", "Mediabrowser Token="+c.Jellyfin.Key)
+								req.Header.Set("x-emby-authorization", "MediaBrowser Client=\"JellyAuth\", Device=\"JellyAuth\", DeviceId=\"1\", Version=\"0.0.1\", Token="+ c.Jellyfin.Key + "")
 								resp, _ := client.Do(req)
+
 								if err != nil {
 									http.Error(w, err.Error(), http.StatusInternalServerError)
 									log.Printf("Error while validating user: %s", err.Error())
