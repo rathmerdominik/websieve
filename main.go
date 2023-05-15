@@ -330,6 +330,26 @@ func main() {
 					return nil
 				},
 			},
+			{
+				Name:  "revoke",
+				Usage: "delete an existing user",
+				Action: func(ctx *cli.Context) error {
+					readConfig(cf, paths, toml.Unmarshal, &c)
+					db := getDB(c)
+
+					for _, name := range ctx.Args().Slice() {
+						_, err := db.Exec(`
+							DELETE FROM user
+							WHERE name = ?
+						`, name)
+						if err != nil {
+							return err
+						}
+					}
+
+					return nil
+				},
+			},
 		},
 	}
 
