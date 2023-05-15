@@ -91,7 +91,8 @@ var hbhHeaders = []string{
 }
 
 func main() {
-	logger := log.New(os.Stderr, "websieve: ", log.Lshortfile)
+	log.SetFlags(log.Lshortfile | log.Ldate | log.Ltime)
+	log.SetPrefix("websieve: ")
 
 	c := config{
 		Address:      "localhost:8080",
@@ -121,8 +122,8 @@ func main() {
 				Name:  "run",
 				Usage: "run websieve",
 				Action: func(ctx *cli.Context) error {
-					readConfig(cf, paths, toml.Unmarshal, &c, logger)
-					db := getDB(c, logger)
+					readConfig(cf, paths, toml.Unmarshal, &c)
+					db := getDB(c)
 
 					session.InitManager(
 						session.SetStore(redis.NewRedisStore(&redis.Options{
@@ -138,7 +139,7 @@ func main() {
 					prefixre := regexp.MustCompile(`^/[^/]+`)
 					for key, target := range c.Targets {
 						if !re.Match([]byte(key)) {
-							logger.Fatalf("Target key did not match requirements: %s", re.String())
+							log.Fatalf("Target key did not match requirements: %s", re.String())
 						}
 
 						t := template.New("")
@@ -149,7 +150,7 @@ func main() {
 							if err == nil {
 								text = string(buf)
 							} else {
-								logger.Print("Cannot read template file, falling back to default template")
+								log.Print("Cannot read template file, falling back to default template")
 								text = fallbackTemplate
 							}
 						} else {
@@ -162,7 +163,7 @@ func main() {
 							store, err := session.Start(context.Background(), w, srcreq)
 							if err != nil {
 								http.Error(w, err.Error(), http.StatusBadGateway)
-								logger.Printf("Error while starting session: %s", err.Error())
+								log.Printf("Error while starting session: %s", err.Error())
 								return
 							}
 
@@ -182,7 +183,7 @@ func main() {
 								if err == nil {
 									authenticated = true
 								} else if !errors.Is(err, sql.ErrNoRows) {
-									logger.Fatalf("Error while scanning row: %s", err.Error())
+									log.Fatalf("Error while scanning row: %s", err.Error())
 								}
 							}
 
@@ -209,9 +210,9 @@ func main() {
 									err = row.Scan(&user.ID, &user.Password)
 									if err != nil {
 										if !errors.Is(err, sql.ErrNoRows) {
-											logger.Fatalf("Error while scanning row: %s", err.Error())
+											log.Fatalf("Error while scanning row: %s", err.Error())
 										} else {
-											logger.Printf("User %s not found", fuser.Name)
+											log.Printf("User %s not found", fuser.Name)
 											http.Redirect(w, srcreq, relative, http.StatusSeeOther)
 											return
 										}
@@ -226,7 +227,7 @@ func main() {
 									err = store.Save()
 									if err != nil {
 										http.Error(w, err.Error(), http.StatusInternalServerError)
-										logger.Printf("Could not save data to session: %s", err.Error())
+										log.Printf("Could not save data to session: %s", err.Error())
 										return
 									}
 
@@ -234,19 +235,19 @@ func main() {
 									return
 								} else {
 									http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-									logger.Print("Method not allowed")
+									log.Print("Method not allowed")
 									return
 								}
 							}
 
 							t, err := url.Parse(target.BaseURL)
 							if err != nil {
-								logger.Fatalf("Cannot parse base URL: %s", err.Error())
+								log.Fatalf("Cannot parse base URL: %s", err.Error())
 							}
 							t.Path, err = url.JoinPath(t.Path, strings.TrimPrefix(srcreq.URL.Path, "/"+key))
 							if err != nil {
 								http.Error(w, err.Error(), http.StatusInternalServerError)
-								logger.Printf("Error while attempting to create new path: %s", err.Error())
+								log.Printf("Error while attempting to create new path: %s", err.Error())
 								return
 							}
 
@@ -272,7 +273,7 @@ func main() {
 							resp, err := hc.Do(destreq)
 							if err != nil {
 								http.Error(w, err.Error(), http.StatusBadGateway)
-								logger.Printf("Error while proxying request: %s", err.Error())
+								log.Printf("Error while proxying request: %s", err.Error())
 								return
 							}
 							defer resp.Body.Close()
@@ -292,7 +293,7 @@ func main() {
 					}
 
 					if err := http.ListenAndServe(c.Address, nil); err != nil {
-						logger.Fatalf("Listen error: %s", err.Error())
+						log.Fatalf("Listen error: %s", err.Error())
 					}
 
 					return nil
@@ -307,8 +308,8 @@ func main() {
 						Name:  "create",
 						Usage: "create a new user",
 						Action: func(ctx *cli.Context) error {
-							readConfig(cf, paths, toml.Unmarshal, &c, logger)
-							db := getDB(c, logger)
+							readConfig(cf, paths, toml.Unmarshal, &c)
+							db := getDB(c)
 
 							for _, name := range ctx.Args().Slice() {
 								fmt.Fprintf(os.Stderr, "Enter password for new user %s: ", name)
@@ -340,11 +341,11 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		logger.Fatalf("Argument error: %s", err.Error())
+		log.Fatalf("Argument error: %s", err.Error())
 	}
 }
 
-func readConfig(path string, paths []string, unmarshal func(data []byte, v interface{}) error, v interface{}, logger *log.Logger) {
+func readConfig(path string, paths []string, unmarshal func(data []byte, v interface{}) error, v interface{}) {
 	var err error
 
 	if path == "" {
@@ -358,34 +359,34 @@ func readConfig(path string, paths []string, unmarshal func(data []byte, v inter
 		}
 
 		if path == "" {
-			logger.Fatal("Unable to locate configuration file")
+			log.Fatal("Unable to locate configuration file")
 		}
 	} else {
 		_, err = os.Stat(path)
 		if err != nil {
-			logger.Fatalf("Could not stat %s: %s", path, err.Error())
+			log.Fatalf("Could not stat %s: %s", path, err.Error())
 		}
 	}
 
 	content, err := os.ReadFile(path)
 	if err != nil {
-		logger.Fatalf("Unable to read configuration file %s: %s", path, err.Error())
+		log.Fatalf("Unable to read configuration file %s: %s", path, err.Error())
 	}
 
 	err = unmarshal(content, v)
 	if err != nil {
-		logger.Fatalf("Unable to unmarshal configuration file %s: %s", path, err.Error())
+		log.Fatalf("Unable to unmarshal configuration file %s: %s", path, err.Error())
 	}
 }
 
-func getDB(c config, logger *log.Logger) *sql.DB {
+func getDB(c config) *sql.DB {
 	db, err := sql.Open("sqlite3", c.DatabaseFile)
 	if err != nil {
-		logger.Fatalf("Error while opening database: %s", err.Error())
+		log.Fatalf("Error while opening database: %s", err.Error())
 	}
 	err = initDB(db)
 	if err != nil {
-		logger.Fatalf("Could not initialize the database: %s", err.Error())
+		log.Fatalf("Could not initialize the database: %s", err.Error())
 	}
 
 	return db
